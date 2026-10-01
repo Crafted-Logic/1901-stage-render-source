@@ -93,8 +93,8 @@ is read live in the current run; nothing from a prior run is reused.
 1. **Queue read.** Run `1901-read-idea-queue`. `SOURCE_UNAVAILABLE` or
    `SCHEMA_WARNING` → `SOURCE_UNAVAILABLE`; `NOT_FOUND` → `NOT_FOUND`;
    `DUPLICATE_ID` → `DUPLICATE_ID`, never pick a row. If `status`,
-   `human_decision`, `render_source_path`, or `printify_id` is `null` (column
-   absent or duplicated) → `SOURCE_UNAVAILABLE`.
+   `human_decision`, or `render_source_path` is `null` (column absent or
+   duplicated) → `SOURCE_UNAVAILABLE`.
 2. **Approval.** `human_decision` must be exactly `APPROVE` and `status`
    exactly `Approved`, case-sensitive, untrimmed. Either fails →
    `HUMAN_APPROVAL_REQUIRED`. Never infer approval from notes, `art_path`,
@@ -108,8 +108,11 @@ is read live in the current run; nothing from a prior run is reused.
    `SOURCE_NOT_RESOLVED` carrying the resolver's `human_action_required`.
 5. **Identity.** The file id in `render_source_path` must equal the resolver's
    `drive_file_id`. Otherwise → `SOURCE_MISMATCH`. Do not pick either side.
-6. **Governance.** Run `1901-prepare-production-handoff` in production mode.
-   A `test_fixture` result or `SOURCE_UNAVAILABLE` → `SOURCE_UNAVAILABLE`.
+6. **Governance.** If `printify_id` is non-blank, record an `INFO` check:
+   a pre-existing Printify draft is a parked production artifact that neither
+   blocks nor bypasses the render stage, and this skill does not touch it.
+   Run `1901-prepare-production-handoff` in production mode. A
+   `test_fixture` result or `SOURCE_UNAVAILABLE` → `SOURCE_UNAVAILABLE`.
    Then apply the Governance section below to its `blockers`.
 7. **Drive identity.** Read the file's metadata by id (read-only). Drive
    unreadable → `SOURCE_UNAVAILABLE`; file missing, trashed, or inaccessible
@@ -154,12 +157,25 @@ is read live in the current run; nothing from a prior run is reused.
   `BUDGET_BLOCK`, `UNKNOWN_BLOCKER` → `GOVERNANCE_BLOCK`, carrying the
   handoff's `next_action`.
 
-**No implicit policy decision.** Whether pre-existing Printify drafts must
-pass through the render stage is an unresolved governance question. Do not
-decide it here. If readiness or the handoff reports it as unresolved and it
-materially bears on this design (for example the design has a Printify
-draft), return `GOVERNANCE_BLOCK`. Never modify Open Items, the Decision Log,
-or governing documents. This skill implements infrastructure only.
+**Pre-existing Printify drafts.** The governing rule, recorded in
+`01 — 1901 Listing Render System (CURRENT)` and `07 — Decision Log`, is:
+all human-approved designs pass through the Listing Render Stage before
+listing work, including keeper and holiday Printify drafts created before
+the render system. Existing Printify drafts are parked production artifacts
+and do not bypass rendering. Accordingly a non-blank `printify_id`:
+
+- does not bypass rendering,
+- does not itself block staging,
+- is treated as a parked downstream production artifact,
+- is never read from, written to, or acted on through Printify by this
+  skill.
+
+The skill raises no blocker of its own for a Printify draft. Blockers come
+only from the handoff skill's live reading of the queue, Drive, Open Items
+and governing documents, and every blocker it reports still blocks as mapped
+above; nothing is waived on the strength of this rule. Never modify Open
+Items, the Decision Log, or governing documents. This skill implements
+infrastructure only.
 
 ## Source Retrieval and Byte Preservation
 
@@ -359,8 +375,9 @@ Return exactly one JSON object:
   Never staged by this skill.
 - **The only blocker is the "bridge not built" open item.** Continue, with
   the waiver recorded. Any other open item in that blocker → `GOVERNANCE_BLOCK`.
-- **Printify draft exists and the render-stage policy is unresolved.**
-  `GOVERNANCE_BLOCK`. Do not decide the policy.
+- **A pre-existing Printify draft exists.** It neither bypasses nor blocks
+  rendering. Continue through the governed render-stage workflow; this skill
+  does not modify, read, or publish the Printify draft.
 - **A folder already exists for the design.** Never overwrite. `ALREADY_STAGED`
   only when the same file verifies; otherwise `STAGING_CONFLICT`.
 - **Download failed, try again.** Not in this run. `DOWNLOAD_FAILED`, temp
@@ -1048,14 +1065,14 @@ An authorised run finds the same Drive file already staged; the downloaded bytes
 }
 ```
 
-### I. Printify-draft policy unresolved: GOVERNANCE_BLOCK
+### I. Pre-existing Printify draft, otherwise ready: AWAITING_AUTHORIZATION
 
-The bridge item is waived; the documentation conflict about Printify drafts is not.
+Input: `Stage the render source for 1901-093.` with a non-blank `printify_id`. The draft is noted and the run reaches the authorization gate. `AUTHORIZE SOURCE STAGE 1901-093` in a new run then stages normally.
 
 ```json
 {
  "design_id": "1901-093",
- "result": "GOVERNANCE_BLOCK",
+ "result": "AWAITING_AUTHORIZATION",
  "stage_performed": false,
  "timestamp": "2026-10-01T00:30:00Z",
  "source": {
@@ -1067,9 +1084,9 @@ The bridge item is waived; the documentation conflict about Printify drafts is n
  },
  "staging": {
   "root": "/home/claude/agents/1901/shared/render-handoffs/",
-  "design_folder": "",
-  "source_path": "",
-  "manifest_path": ""
+  "design_folder": "/home/claude/agents/1901/shared/render-handoffs/1901-093",
+  "source_path": "/home/claude/agents/1901/shared/render-handoffs/1901-093/source/1901-093-B.png",
+  "manifest_path": "/home/claude/agents/1901/shared/render-handoffs/1901-093/manifest.json"
  },
  "verification": {
   "queue_verified": true,
@@ -1084,9 +1101,7 @@ The bridge item is waived; the documentation conflict about Printify drafts is n
   "received": false,
   "evidence": ""
  },
- "warnings": [
-  "Readiness reported OPEN_ITEM_BLOCK solely for the open item that the image-handoff bridge is not built; this skill is that bridge, so the item was not treated as a blocker. No other Open Item was waived."
- ],
+ "warnings": [],
  "checks": [
   {
    "check": "input",
@@ -1119,17 +1134,32 @@ The bridge item is waived; the documentation conflict about Printify drafts is n
    "detail": "render_source_path and the resolver name the same Drive file 1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve"
   },
   {
-   "check": "governance",
+   "check": "printify_draft",
    "status": "INFO",
-   "detail": "Readiness reported OPEN_ITEM_BLOCK solely for the open item that the image-handoff bridge is not built; this skill is that bridge, so the item was not treated as a blocker. No other Open Item was waived."
+   "detail": "printify_id '68d1f0c2' present: a parked production artifact; it does not bypass or block the render stage and is not touched by this skill"
   },
   {
    "check": "governance",
+   "status": "PASS",
+   "detail": "1901-prepare-production-handoff reports no unresolved blocker for this design"
+  },
+  {
+   "check": "drive_identity",
+   "status": "PASS",
+   "detail": "Drive file 1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve exists: 1901-093-B.png, image/png"
+  },
+  {
+   "check": "existing_staging",
+   "status": "PASS",
+   "detail": "no handoff folder exists for this design"
+  },
+  {
+   "check": "authorization",
    "status": "FAIL",
-   "detail": "DOCUMENTATION_CONFLICT: Governing docs do not settle whether pre-existing Printify drafts must pass through the render stage; this design has a Printify draft"
+   "detail": "the current run does not contain the exact command AUTHORIZE SOURCE STAGE 1901-093; ordinary requests and vague confirmations never authorize staging"
   }
  ],
- "human_action_required": "Jody must resolve the governing production-source rule before production can continue."
+ "human_action_required": "No files created. 1901-093 is eligible: 1901-093-B.png (Drive id 1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve, https://drive.google.com/file/d/1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve/view) would be staged byte-for-byte at /home/claude/agents/1901/shared/render-handoffs/1901-093/source/1901-093-B.png with /home/claude/agents/1901/shared/render-handoffs/1901-093/manifest.json. To authorize exactly this staging, send exactly: AUTHORIZE SOURCE STAGE 1901-093"
 }
 ```
 

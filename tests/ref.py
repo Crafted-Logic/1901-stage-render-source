@@ -70,9 +70,9 @@ def run(design_id, queue, drive, resolver, handoff, message="", root=None, now=T
         rows = queue.get("source", {}).get("matching_rows", [])
         chk("queue_read", "FAIL", f"rows {rows} all carry id {did}; none chosen"); return done("DUPLICATE_ID", f"Resolve the duplicate Idea Queue rows for {did} (rows {', '.join(map(str, rows))}), then re-run.")
     rec, row = queue["record"], queue["source"]["row_number"]
-    if any(rec.get(k) is None for k in ("status", "human_decision", "render_source_path", "printify_id")):
+    if any(rec.get(k) is None for k in ("status", "human_decision", "render_source_path")):
         chk("queue_read", "FAIL", "a required column is missing or duplicated in the live header row")
-        return done("SOURCE_UNAVAILABLE", "Repair the Idea Queue header row so status, human_decision, render_source_path and printify_id each appear exactly once, then re-run.")
+        return done("SOURCE_UNAVAILABLE", "Repair the Idea Queue header row so status, human_decision and render_source_path each appear exactly once, then re-run.")
     ver["queue_verified"] = True
     chk("queue_read", "PASS", f"exactly one row (sheet row {row}) carries id {did}")
 
@@ -119,7 +119,11 @@ def run(design_id, queue, drive, resolver, handoff, message="", root=None, now=T
     out["source"].update(drive_file_id=fid, drive_url=canonical(fid), filename=rf["name"], mime_type=rf["mime_type"])
     chk("source_identity", "PASS", f"render_source_path and the resolver name the same Drive file {fid}")
 
-    # 6 governance via the handoff skill
+    # 6 governance via the handoff skill. A pre-existing Printify draft (non-blank printify_id) is a
+    # parked downstream artifact under the governing rule: it neither blocks nor bypasses rendering,
+    # and nothing here acts on it. Blockers come only from the handoff skill's live reading.
+    if rec.get("printify_id"):
+        chk("printify_draft", "INFO", f"printify_id '{rec['printify_id']}' present: a parked production artifact; it does not bypass or block the render stage and is not touched by this skill")
     if handoff.get("validation_mode") == "test_fixture" or handoff.get("handoff_status") == "SOURCE_UNAVAILABLE":
         chk("governance", "FAIL", "1901-prepare-production-handoff produced no production evidence")
         return done("SOURCE_UNAVAILABLE", "Restore read access to the sources 1901-prepare-production-handoff needs, then re-run.")
