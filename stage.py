@@ -14,7 +14,8 @@ Commands (each prints exactly one JSON object):
            -> creates <root>/.tmp-<id>-<run>/source/ and prints where to put the bytes
   finalize --tmp DIR --design-id ID --drive-file-id FID --drive-url URL --filename NAME
            --drive-mime MIME --status S --human-decision H --render-source-path P
-           --source-resolution RESOLVED [--downloaded PATH] [--warning TEXT]... [--root R]
+           --source-resolution RESOLVED [--source-role ROLE] [--lineage JSON]
+           [--downloaded PATH] [--warning TEXT]... [--root R]
            -> outcome STAGED | ALREADY_STAGED | STAGING_CONFLICT | DOWNLOAD_FAILED |
               HASH_FAILED | MANIFEST_FAILED | VERIFICATION_FAILED
   abort    --tmp DIR -> removes a temporary staging directory (only ever a .tmp-* dir under root)
@@ -22,7 +23,9 @@ Commands (each prints exactly one JSON object):
 import argparse, hashlib, json, os, shutil, sys, datetime, uuid
 
 DEFAULT_ROOT = "/home/claude/agents/1901/shared/render-handoffs/"
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
+SOURCE_ROLES = ("resolved_source", "approved_prepared_derivative")
+LINEAGE_KEYS = ("canonical_master", "production_requirement", "governing_document", "approval_record")
 
 
 def now_iso():
@@ -53,7 +56,26 @@ def write_manifest(path, manifest):
         f.write("\n")
 
 
-def build_manifest(a, sha, local_path, created_at, warnings):
+def parse_lineage(value):
+    """Lineage of an approved production-prepared derivative, as recorded in the governed production
+    record and read live by the skill. None for a resolved source. Returns (lineage, error)."""
+    if value is None or value == "":
+        return None, None
+    try:
+        lineage = json.loads(value) if isinstance(value, str) else value
+    except ValueError:
+        return None, "lineage is not valid JSON"
+    if not isinstance(lineage, dict) or any(k not in lineage for k in LINEAGE_KEYS):
+        return None, "lineage must be a JSON object with canonical_master, production_requirement, governing_document and approval_record"
+    cm = lineage.get("canonical_master")
+    if not isinstance(cm, dict) or not cm.get("drive_file_id"):
+        return None, "lineage.canonical_master must name the canonical creative master by drive_file_id"
+    if not all(isinstance(lineage.get(k), str) and lineage.get(k) for k in LINEAGE_KEYS[1:]):
+        return None, "lineage.production_requirement, governing_document and approval_record must be non-empty strings"
+    return lineage, None
+
+
+def build_manifest(a, sha, local_path, created_at, warnings, lineage=None):
     return {
         "schema_version": SCHEMA_VERSION,
         "design_id": a.design_id,
@@ -65,7 +87,9 @@ def build_manifest(a, sha, local_path, created_at, warnings):
             "drive_mime_type": a.drive_mime,
             "sha256": sha,
             "local_path": local_path,
+            "role": getattr(a, "source_role", None) or "resolved_source",
         },
+        "lineage": lineage,
         "authority": {
             "status": a.status,
             "human_decision": a.human_decision,
@@ -191,7 +215,19 @@ def finalize(a, created_at=None):
     if ex["outcome"] == "STAGING_CONFLICT":
         return fail("STAGING_CONFLICT", ex["detail"])
 
-    # 4. manifest
+    # 4. manifest (role and lineage are recorded, never inferred: a derivative needs its lineage)
+    role = getattr(a, "source_role", None) or "resolved_source"
+    if role not in SOURCE_ROLES:
+        return fail("MANIFEST_FAILED", f"unknown source role {role!r}")
+    lineage, lerr = parse_lineage(getattr(a, "lineage", None))
+    if lerr:
+        return fail("MANIFEST_FAILED", lerr)
+    if role == "approved_prepared_derivative" and lineage is None:
+        return fail("MANIFEST_FAILED", "an approved production-prepared derivative cannot be staged without its recorded lineage")
+    if role == "resolved_source" and lineage is not None:
+        return fail("MANIFEST_FAILED", "lineage is only recorded for an approved production-prepared derivative")
+    if lineage is not None and lineage["canonical_master"].get("drive_file_id") == a.drive_file_id:
+        return fail("MANIFEST_FAILED", "lineage names the staged file itself as its canonical master")
     warnings = list(a.warning or [])
     ext = os.path.splitext(a.filename)[1].lower()
     mime_exts = {"image/png": {".png"}, "image/jpeg": {".jpg", ".jpeg"}, "image/webp": {".webp"}, "image/tiff": {".tif", ".tiff"}, "image/gif": {".gif"}, "image/svg+xml": {".svg"}}
@@ -199,7 +235,7 @@ def finalize(a, created_at=None):
         w = f"Filename extension {ext or '(none)'} differs from Drive MIME type {a.drive_mime}. File bytes were preserved exactly; no conversion or rename was performed."
         if w not in warnings:
             warnings.append(w)
-    manifest = build_manifest(a, sha1, final_source, created_at or now_iso(), warnings)
+    manifest = build_manifest(a, sha1, final_source, created_at or now_iso(), warnings, lineage)
     try:
         write_manifest(tmp_manifest, manifest)
         back = read_manifest(tmp_manifest)
@@ -215,7 +251,7 @@ def finalize(a, created_at=None):
         return fail("VERIFICATION_FAILED", f"staged file could not be re-hashed ({e.__class__.__name__})")
     if sha2 != sha1:
         return fail("VERIFICATION_FAILED", f"staged file's SHA-256 changed between staging ({sha1[:12]}…) and verification ({sha2[:12]}…)")
-    if back["source"]["sha256"] != sha2 or back["source"]["filename"] != a.filename or back["design_id"] != a.design_id:
+    if back["source"]["sha256"] != sha2 or back["source"]["filename"] != a.filename or back["design_id"] != a.design_id or back["source"]["role"] != role or back.get("lineage") != lineage:
         return fail("VERIFICATION_FAILED", "manifest contents do not describe the staged file")
 
     # 6. atomic publish
@@ -244,6 +280,8 @@ def main(argv=None):
     f = sub.add_parser("finalize")
     for name in ("--tmp", "--design-id", "--drive-file-id", "--drive-url", "--filename", "--drive-mime", "--status", "--human-decision", "--render-source-path", "--source-resolution"):
         f.add_argument(name, required=True)
+    f.add_argument("--source-role", default="resolved_source", choices=SOURCE_ROLES, help="resolved_source (default) or approved_prepared_derivative")
+    f.add_argument("--lineage", help="JSON object {canonical_master:{drive_file_id,filename,drive_url}, production_requirement, governing_document, approval_record}; required for a derivative")
     f.add_argument("--downloaded"); f.add_argument("--expected-sha256"); f.add_argument("--warning", action="append"); f.add_argument("--root", default=DEFAULT_ROOT)
     x = sub.add_parser("abort"); x.add_argument("--tmp", required=True); x.add_argument("--root", default=DEFAULT_ROOT)
     a = p.parse_args(argv)

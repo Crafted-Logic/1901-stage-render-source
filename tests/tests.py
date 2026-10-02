@@ -148,6 +148,80 @@ c, dr = Case(), drive(name="1901-093-B-PRINT.png"); T("N5", "Drive metadata diff
 c, dr = Case(), drive(download_fail=True); assert run("1901-093", queue(), dr, resolver(), handoff(), AUTH, c.root)["result"] == "DOWNLOAD_FAILED"
 dr.download_fail = False; o = run("1901-093", queue(), dr, resolver(), handoff(), "Proceed.", c.root); assert o["result"] == "AWAITING_AUTHORIZATION" and c.tree() == []
 o = run("1901-093", queue(), dr, resolver(), handoff(), AUTH, c.root); assert o["result"] == "STAGED"; print(" P1. PASS prior-run authorization does not carry; fresh command after a failed run stages once"); c.done()
+
+# D: approved production-prepared derivatives (governing rule 2026-10-02). The canonical creative master stays
+# the resolver's answer; render_source_path points to the derivative; staging is allowed only when all five
+# recorded conditions verify. Ids and names below are the live 1901-093 facts; bytes and records are fixtures.
+DID = "10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR"; DNAME = "1901-093-B-transparent-prep-v2.png"
+DPNG = b"\x89PNG\r\n\x1a\n" + bytes(range(0, 256, 2)) * 5
+REQ = "true transparency for apparel"; GDOC = "01 \u2014 1901 Listing Render System (CURRENT)"; AREC = "07 \u2014 Decision Log: 2026-10-02 entry approving 1901-093-B-transparent-prep-v2.png (Drive id 10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR) as the production-prepared render source for 1901-093"
+def record(**over):
+    ap = {"record": AREC, "derivative_drive_file_id": DID, "derivative_filename": DNAME, "canonical_master_drive_file_id": FID, "purpose": REQ, "identity_preserved": True, "approved_by_human": True}
+    r = {"governing_document": GDOC, "production_requirement": REQ, "requirement_applies_to_design": True, "approval": ap}
+    for k, v in over.items():
+        (ap if k in ap else r)[k] = v
+    return r
+def ddrive(name=DNAME, mime="image/png", data=DPNG, master=True, **kw):
+    files = {DID: {"name": name, "mime_type": mime, "bytes": data}}
+    if master: files[FID] = {"name": "1901-093-B.png", "mime_type": "image/png", "bytes": PNG}
+    return Drive(files, **kw)
+def drun(msg, rec=None, dr=None, root=None, **q): return run("1901-093", queue(rsp=canonical(DID), **q), dr, resolver(), handoff(), msg, root, derivative_record=rec)
+LIN = {"canonical_master": {"drive_file_id": FID, "filename": "1901-093-B.png", "drive_url": canonical(FID)}, "production_requirement": REQ, "governing_document": GDOC, "approval_record": AREC}
+def deriv_proposal_ok(o, c):
+    assert c.tree() == [] and o["source"]["role"] == "approved_prepared_derivative" and o["source"]["drive_file_id"] == DID and o["source"]["filename"] == DNAME and o["lineage"] == LIN
+    assert "AUTHORIZE SOURCE STAGE 1901-093" in o["human_action_required"] and canonical(DID) in o["human_action_required"] and "source/" + DNAME in o["human_action_required"] and FID in o["human_action_required"]
+    assert any(k["check"] == "prepared_derivative" and k["status"] == "PASS" for k in o["checks"]) and o["checks"][-1]["check"] == "authorization"
+c, dr = Case(), ddrive(); T("D1", "approved prepared derivative, proposal", drun(ASK, record(), dr, c.root), "AWAITING_AUTHORIZATION", False, c, dr, deriv_proposal_ok)
+def deriv_staged_ok(o, c):
+    assert c.tree() == ["1901-093/manifest.json", "1901-093/source/" + DNAME], c.tree()
+    assert open(os.path.join(c.root, "1901-093/source/" + DNAME), "rb").read() == DPNG, "bytes altered"
+    m = json.load(open(os.path.join(c.root, "1901-093/manifest.json")))
+    assert m["schema_version"] == "1.1" and m["source"]["drive_file_id"] == DID and m["source"]["filename"] == DNAME and m["source"]["role"] == "approved_prepared_derivative" and m["lineage"] == LIN == o["lineage"]
+    assert m["source"]["sha256"] == hashlib.sha256(DPNG).hexdigest() == o["source"]["sha256"] and m["authority"]["render_source_path"] == canonical(DID) and m["authority"]["source_resolution"] == "RESOLVED" and m["integrity"]["artwork_modified"] is False
+    assert all(o["verification"].values())
+c, dr = Case(), ddrive(); T("D2", "approved prepared derivative, exact authorization", drun(AUTH, record(), dr, c.root), "STAGED", True, c, dr, deriv_staged_ok)
+c, dr = Case(), ddrive(); T("D2b", "derivative: 'Proceed.' after a proposal", drun("Proceed.", record(), dr, c.root), "AWAITING_AUTHORIZATION", False, c, dr)
+c, dr = Case(), ddrive(); T("D2c", "derivative: wrong design id command", drun("AUTHORIZE SOURCE STAGE 1901-094", record(), dr, c.root), "AWAITING_AUTHORIZATION", False, c, dr)
+def mismatch_names(*needles):
+    def f(o, c):
+        k = [k for k in o["checks"] if k["check"] == "prepared_derivative"]; assert k and k[0]["status"] == "FAIL", o["checks"][-1]
+        for n in needles: assert n in k[0]["detail"], (n, k[0]["detail"])
+        assert o["lineage"] is None and o["source"]["drive_file_id"] == "" and c.tree() == []
+    return f
+c, dr = Case(), ddrive(); T("D3", "derivative with no governed record", drun(ASK, None, dr, c.root), "SOURCE_MISMATCH", False, c, dr, mismatch_names("no current governing record"))
+c, dr = Case(), ddrive(); T("D4", "derivative without explicit human approval", drun(AUTH, record(approved_by_human=False), dr, c.root), "SOURCE_MISMATCH", False, c, dr, mismatch_names("(4)"))
+c, dr = Case(), ddrive(); T("D4b", "derivative approval with no record location", drun(AUTH, record(record=""), dr, c.root), "SOURCE_MISMATCH", False, c, dr, mismatch_names("(4)"))
+c, dr = Case(), ddrive(); T("D5", "approval names a different derivative id", drun(AUTH, record(derivative_drive_file_id="1OTHERfileAAAAAAAAAAAAAAAAAAAAAAAA"), dr, c.root), "SOURCE_MISMATCH", False, c, dr, mismatch_names("(5)"))
+c, dr = Case(), ddrive(); T("D6", "lineage names a different master", drun(AUTH, record(canonical_master_drive_file_id="1OTHERfileAAAAAAAAAAAAAAAAAAAAAAAA"), dr, c.root), "SOURCE_MISMATCH", False, c, dr, mismatch_names("(3)"))
+c, dr = Case(), ddrive(); T("D7", "derivative prepared for a non-governing purpose (upscale)", drun(AUTH, record(purpose="4x upscale for print"), dr, c.root), "SOURCE_MISMATCH", False, c, dr, mismatch_names("(1)", "upscale"))
+c, dr = Case(), ddrive(); T("D7b", "no governing requirement at all", drun(AUTH, record(production_requirement="", purpose=""), dr, c.root), "SOURCE_MISMATCH", False, c, dr, mismatch_names("(1)"))
+c, dr = Case(), ddrive(); T("D7c", "requirement exists but does not apply to this design", drun(AUTH, record(requirement_applies_to_design=False), dr, c.root), "SOURCE_MISMATCH", False, c, dr, mismatch_names("(1)"))
+c, dr = Case(), ddrive(); T("D8", "approval does not state identity preserved", drun(AUTH, record(identity_preserved=None), dr, c.root), "SOURCE_MISMATCH", False, c, dr, mismatch_names("(2)"))
+c, dr = Case(), ddrive(); T("D8b", "every condition unmet is listed", drun(AUTH, record(approved_by_human=False, identity_preserved=False, canonical_master_drive_file_id="", derivative_drive_file_id="", purpose="thumbnail"), dr, c.root), "SOURCE_MISMATCH", False, c, dr, mismatch_names("(1)", "(2)", "(3)", "(4)", "(5)"))
+# D9: the live situation on the VPS — the canonical master was staged earlier; a verified derivative is now the source → STAGING_CONFLICT, old folder untouched
+c, dr = Case(), ddrive(); assert run("1901-093", queue(), dr, resolver(), handoff(), AUTH, c.root)["result"] == "STAGED"
+snap = {p_: open(os.path.join(c.root, p_), "rb").read() for p_ in c.tree()}
+for msg in (ASK, AUTH):
+    o = drun(msg, record(), dr, c.root); assert o["result"] == "STAGING_CONFLICT" and o["stage_performed"] is False and o["source"]["role"] == "approved_prepared_derivative" and {p_: open(os.path.join(c.root, p_), "rb").read() for p_ in c.tree()} == snap and not any(d.startswith(".tmp-") for d in c.dirs()), o["checks"][-1]
+print(" D9. PASS canonical master already staged, verified derivative now the source: STAGING_CONFLICT (proposal and authorized), previous handoff untouched"); examples["D9"] = o; c.done()
+c, dr = Case(), ddrive(name="1901-093-B-transparent-prep-v3.png"); T("D10", "live Drive name differs from the approval record's", drun(AUTH, record(), dr, c.root), "SOURCE_MISMATCH", False, c, dr)
+c, dr = Case(), ddrive(master=False); T("D10b", "derivative file gone from Drive", drun(AUTH, record(), Drive({FID: {"name": "1901-093-B.png", "mime_type": "image/png", "bytes": PNG}}), c.root), "SOURCE_MISSING", False, c, dr)
+c, dr = Case(), ddrive(mime="image/jpeg", data=JPG); o = drun(AUTH, record(), dr, c.root)
+T("D11", "derivative .png name, image/jpeg MIME: staged with the warning", o, "STAGED", True, c, dr, lambda o, c: (open(os.path.join(c.root, "1901-093/source/" + DNAME), "rb").read() == JPG and len(o["warnings"]) == 1 and "image/jpeg" in o["warnings"][0] and json.load(open(os.path.join(c.root, "1901-093/manifest.json")))["lineage"] == LIN) or sys.exit("D11"))
+c, dr = Case(), ddrive(); T("D12", "derivative + Printify draft + bridge-only open item waived", run("1901-093", queue(rsp=canonical(DID), printify="68d1f0c2"), dr, resolver(), handoff(BRIDGE_ONLY, "BLOCKED", "Resolve the unresolved Open Item that bears on the next production step and record the decision."), ASK, c.root, derivative_record=record()), "AWAITING_AUTHORIZATION", False, c, dr)
+c, dr = Case(), ddrive(); T("D13", "derivative + unrelated governance blocker still blocks", run("1901-093", queue(rsp=canonical(DID)), dr, resolver(), handoff([{"code": "SOFT_IP_BLOCK", "detail": "open"}], "BLOCKED", "Ame must resolve or withdraw the active soft-IP concern before production can continue."), AUTH, c.root, derivative_record=record()), "GOVERNANCE_BLOCK", False, c, dr)
+c, dr = Case(), ddrive(); T("D14", "derivative without human approval of the design itself", drun(AUTH, record(), dr, c.root, hd=""), "HUMAN_APPROVAL_REQUIRED", False, c, dr)
+# D15: a record exists but render_source_path still points at the master → the ordinary branch, record ignored, master staged with no lineage
+c, dr = Case(), ddrive(); o = run("1901-093", queue(), dr, resolver(), handoff(), AUTH, c.root, derivative_record=record())
+T("D15", "record present but render_source_path names the master: master staged, no lineage", o, "STAGED", True, c, dr, lambda o, c: (o["source"]["role"] == "resolved_source" and o["lineage"] is None and json.load(open(os.path.join(c.root, "1901-093/manifest.json")))["lineage"] is None and c.tree() == ["1901-093/manifest.json", "1901-093/source/1901-093-B.png"]) or sys.exit("D15"))
+# D16: stage.py refuses a derivative role without lineage, and lineage on a resolved source (script-level guard)
+c = Case(); b = stage.begin(c.root, "1901-093", DNAME, "x"); open(b["download_to"], "wb").write(DPNG)
+class A2: pass
+a = A2(); a.root = c.root; a.tmp = b["tmp"]; a.design_id = "1901-093"; a.drive_file_id = DID; a.drive_url = canonical(DID); a.filename = DNAME; a.drive_mime = "image/png"; a.status = "Approved"; a.human_decision = "APPROVE"; a.render_source_path = canonical(DID); a.source_resolution = "RESOLVED"; a.downloaded = None; a.expected_sha256 = None; a.warning = []
+a.source_role = "approved_prepared_derivative"; a.lineage = None; f = stage.finalize(a); assert f["outcome"] == "MANIFEST_FAILED" and "lineage" in f["detail"] and c.tree() == []
+b = stage.begin(c.root, "1901-093", DNAME, "y"); open(b["download_to"], "wb").write(DPNG); a.tmp = b["tmp"]; a.source_role = "resolved_source"; a.lineage = json.dumps(LIN); f = stage.finalize(a); assert f["outcome"] == "MANIFEST_FAILED" and c.tree() == []
+b = stage.begin(c.root, "1901-093", DNAME, "z"); open(b["download_to"], "wb").write(DPNG); a.tmp = b["tmp"]; a.source_role = "approved_prepared_derivative"; a.lineage = json.dumps(dict(LIN, canonical_master={"drive_file_id": DID})); f = stage.finalize(a); assert f["outcome"] == "MANIFEST_FAILED" and "itself" in f["detail"] and c.tree() == []
+print(" D16. PASS stage.py refuses a derivative without lineage, lineage on a resolved source, and self-referential lineage"); c.done()
 # 17-20: no Sheet / Drive / Printify / Etsy / renderer calls anywhere in stage.py or ref.py
 import re as _re, inspect
 src = open(os.path.join(HERE, "..", "stage.py")).read() + inspect.getsource(ref)
@@ -156,5 +230,5 @@ for label, pat in (("Google Sheet mutation", r"spreadsheets|values\.update|batch
     print(f" 17-20. PASS no {label} in stage.py or the reference")
 print("ALL PASS")
 if "--dump" in sys.argv:
-    for n in (1, 2, 4, 9, 10, 5, 6, 8, 12, 15, 16, "G4"):
+    for n in (1, 2, 4, 9, 10, 5, 6, 8, 12, 15, 16, "G4", "D1", "D3", "D9"):
         open(f"ex{n}.json", "w").write(json.dumps(examples[n], indent=1, ensure_ascii=False) + "\n")

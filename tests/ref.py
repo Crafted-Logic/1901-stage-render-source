@@ -12,12 +12,38 @@ BRIDGE = re.compile(r"image.handoff bridge|render.stage bridge|handoff bridge", 
 GOVERNANCE = {"DOCUMENTATION_CONFLICT", "SOFT_IP_BLOCK", "OPEN_ITEM_BLOCK", "BUDGET_BLOCK", "UNKNOWN_BLOCKER"}
 APPROVAL = {"STATUS_NOT_APPROVED", "MISSING_HUMAN_APPROVAL", "HUMAN_REVISE", "HUMAN_REJECT"}
 SOURCEISH = {"AMBIGUOUS_SOURCE", "SOURCE_NOT_MASTER", "SOURCE_UNVERIFIED"}
+ROLE_RESOLVED, ROLE_DERIVATIVE = "resolved_source", "approved_prepared_derivative"
 
 
 def canonical(fid): return f"https://drive.google.com/file/d/{fid}/view"
 def file_id_of(url):
     m = re.search(r"/d/([^/?#]+)", url or "") or re.search(r"[?&]id=([^&#]+)", url or "")
     return m.group(1) if m else None
+
+
+def prepared_derivative_unmet(record, rsp_id, master_id):
+    """The five conditions under which a production-prepared derivative may be the render source. `record` is
+    what the skill read live this run from the current governing documents and the design's governed
+    production record; None when nothing recorded names the render_source_path file as an approved
+    production-prepared derivative. Returns the list of unmet conditions; empty means all five verified."""
+    if not isinstance(record, dict):
+        return ["no current governing record names this file as an approved production-prepared derivative of the resolved canonical creative master"]
+    ap = record.get("approval") or {}
+    req = record.get("production_requirement") or ""
+    unmet = []
+    if not (record.get("governing_document") and req and record.get("requirement_applies_to_design") is True):
+        unmet.append("(1) no current governing document states a production requirement that applies to this design")
+    elif ap.get("purpose") != req:
+        unmet.append(f"(1) the recorded preparation purpose {ap.get('purpose')!r} is not the governing production requirement {req!r}; generic derived assets, convenience copies, thumbnails, upscales and unapproved conversions are never render sources")
+    if ap.get("identity_preserved") is not True:
+        unmet.append("(2) the approval record does not state that the prepared derivative preserves the approved design identity and content")
+    if ap.get("canonical_master_drive_file_id") != master_id:
+        unmet.append(f"(3) the approval record does not trace the derivative to the resolved canonical creative master {master_id}")
+    if not (ap.get("approved_by_human") is True and ap.get("record")):
+        unmet.append("(4) no explicit human approval of the prepared derivative itself is recorded")
+    if ap.get("derivative_drive_file_id") != rsp_id:
+        unmet.append(f"(5) render_source_path names Drive file {rsp_id}, which is not the file the approval record names")
+    return unmet
 
 
 def authorization_command(message, design_id):
@@ -40,10 +66,12 @@ class Drive:
         return True
 
 
-def run(design_id, queue, drive, resolver, handoff, message="", root=None, now=TS, run_id=RUN):
-    """queue: read-skill style result; resolver: resolve-skill result; handoff: prepare-handoff result."""
+def run(design_id, queue, drive, resolver, handoff, message="", root=None, now=TS, run_id=RUN, derivative_record=None):
+    """queue: read-skill style result; resolver: resolve-skill result; handoff: prepare-handoff result;
+    derivative_record: the governed record for an approved production-prepared derivative, read live (None if none)."""
     out = {"design_id": "", "result": "", "stage_performed": False, "timestamp": now,
-           "source": {"drive_file_id": "", "drive_url": "", "filename": "", "mime_type": "", "sha256": ""},
+           "source": {"drive_file_id": "", "drive_url": "", "filename": "", "mime_type": "", "sha256": "", "role": ""},
+           "lineage": None,
            "staging": {"root": root, "design_folder": "", "source_path": "", "manifest_path": ""},
            "verification": {"queue_verified": False, "human_approval_verified": False, "source_resolved": False,
                             "source_matches_render_source_path": False, "hash_verified": False, "byte_preserved": False, "manifest_verified": False},
@@ -110,14 +138,29 @@ def run(design_id, queue, drive, resolver, handoff, message="", root=None, now=T
     ver["source_resolved"] = True
     chk("source_resolution", "PASS", f"RESOLVED: {rf['name']} (id {rf['drive_file_id']}, {rf['mime_type']})")
 
-    # 5 identity: render_source_path vs resolver
-    fid = rf["drive_file_id"]
-    if rsp_id != fid:
-        chk("source_identity", "FAIL", f"render_source_path names Drive file {rsp_id} but the resolver resolved {fid}")
-        return done("SOURCE_MISMATCH", f"render_source_path and the resolved production source for {did} name different Drive files; a human must reconcile them before staging.")
-    ver["source_matches_render_source_path"] = True
-    out["source"].update(drive_file_id=fid, drive_url=canonical(fid), filename=rf["name"], mime_type=rf["mime_type"])
-    chk("source_identity", "PASS", f"render_source_path and the resolver name the same Drive file {fid}")
+    # 5 identity: render_source_path vs resolver. Equal → the resolved file is the render source. Different →
+    # the file is eligible only as an approved production-prepared derivative of the resolved canonical creative
+    # master, and only when all five recorded conditions verify; otherwise SOURCE_MISMATCH, exactly as before.
+    master_id = rf["drive_file_id"]
+    if rsp_id == master_id:
+        fid, role, expected_name, expected_mime = master_id, ROLE_RESOLVED, rf["name"], rf["mime_type"]
+        ver["source_matches_render_source_path"] = True
+        out["source"].update(drive_file_id=fid, drive_url=canonical(fid), filename=rf["name"], mime_type=rf["mime_type"], role=role)
+        chk("source_identity", "PASS", f"render_source_path and the resolver name the same Drive file {fid}")
+    else:
+        chk("source_identity", "INFO", f"render_source_path names Drive file {rsp_id}; the resolver resolved the canonical creative master {master_id} ({rf['name']}); {rsp_id} is eligible only as an approved production-prepared derivative")
+        unmet = prepared_derivative_unmet(derivative_record, rsp_id, master_id)
+        if unmet:
+            chk("prepared_derivative", "FAIL", "not verified as an approved production-prepared derivative: " + "; ".join(unmet))
+            return done("SOURCE_MISMATCH", f"render_source_path for {did} names Drive file {rsp_id}, which is neither the resolved canonical creative master {master_id} nor a verified approved production-prepared derivative of it; a human must record the missing approval evidence in the governed production record or point render_source_path back at the approved source through an authorized workflow.")
+        ap = derivative_record["approval"]
+        fid, role, expected_name, expected_mime = rsp_id, ROLE_DERIVATIVE, ap.get("derivative_filename"), None
+        out["lineage"] = {"canonical_master": {"drive_file_id": master_id, "filename": rf["name"], "drive_url": canonical(master_id)},
+                          "production_requirement": derivative_record["production_requirement"],
+                          "governing_document": derivative_record["governing_document"], "approval_record": ap["record"]}
+        ver["source_matches_render_source_path"] = True
+        out["source"].update(drive_file_id=fid, drive_url=canonical(fid), filename=expected_name or "", mime_type="", role=role)
+        chk("prepared_derivative", "PASS", f"Drive file {fid} is recorded as the human-approved production-prepared derivative of canonical master {master_id} for the governing requirement '{derivative_record['production_requirement']}' ({derivative_record['governing_document']}; approval: {ap['record']}); render_source_path points exactly to it")
 
     # 6 governance via the handoff skill. A pre-existing Printify draft (non-blank printify_id) is a
     # parked downstream artifact under the governing rule: it neither blocks nor bypasses rendering,
@@ -153,10 +196,14 @@ def run(design_id, queue, drive, resolver, handoff, message="", root=None, now=T
     if not m or m.get("trashed"):
         chk("drive_identity", "FAIL", f"Drive file {fid} does not exist, is trashed, or is not accessible")
         return done("SOURCE_MISSING", f"The approved source file for {did} (Drive id {fid}) is missing or inaccessible; a human must restore or re-record it before staging.")
-    if m["name"] != rf["name"] or m["mime_type"] != rf["mime_type"]:
+    if role == ROLE_RESOLVED and (m["name"] != expected_name or m["mime_type"] != expected_mime):
         chk("drive_identity", "FAIL", f"live Drive metadata ({m['name']}, {m['mime_type']}) differs from the resolver's ({rf['name']}, {rf['mime_type']})")
         return done("SOURCE_MISMATCH", f"Live Drive metadata for {fid} does not match the resolved file for {did}; a human must confirm the source before staging.")
-    chk("drive_identity", "PASS", f"Drive file {fid} exists: {m['name']}, {m['mime_type']}")
+    if role == ROLE_DERIVATIVE and expected_name and m["name"] != expected_name:
+        chk("drive_identity", "FAIL", f"live Drive name ({m['name']}) differs from the filename the approval record names ({expected_name})")
+        return done("SOURCE_MISMATCH", f"Live Drive metadata for {fid} does not match the approved production-prepared derivative recorded for {did}; a human must confirm the source before staging.")
+    out["source"].update(filename=m["name"], mime_type=m["mime_type"])
+    chk("drive_identity", "PASS", f"Drive file {fid} exists: {m['name']}, {m['mime_type']}" + (" (approved production-prepared derivative; name as recorded)" if role == ROLE_DERIVATIVE else ""))
     ext = os.path.splitext(m["name"])[1].lower()
     mime_exts = {"image/png": {".png"}, "image/jpeg": {".jpg", ".jpeg"}, "image/webp": {".webp"}, "image/tiff": {".tif", ".tiff"}, "image/gif": {".gif"}, "image/svg+xml": {".svg"}}
     if m["mime_type"] in mime_exts and ext not in mime_exts[m["mime_type"]]:
@@ -189,7 +236,8 @@ def run(design_id, queue, drive, resolver, handoff, message="", root=None, now=T
     if not (auth and auth[0] == "OK"):
         if auth: chk("authorization", "FAIL", f"the command names {auth[1]}, not the target {did}; it authorizes nothing in this run")
         else: chk("authorization", "FAIL", f"the current run does not contain the exact command AUTHORIZE SOURCE STAGE {did}; ordinary requests and vague confirmations never authorize staging")
-        return done("AWAITING_AUTHORIZATION", f"No files created. {did} is eligible: {m['name']} (Drive id {fid}, {canonical(fid)}) would be staged byte-for-byte at {src_path} with {man_path}. To authorize exactly this staging, send exactly: AUTHORIZE SOURCE STAGE {did}")
+        what = f"{m['name']} (Drive id {fid}, {canonical(fid)})" + (f", the approved production-prepared derivative of canonical master {master_id} ({rf['name']})" if role == ROLE_DERIVATIVE else "")
+        return done("AWAITING_AUTHORIZATION", f"No files created. {did} is eligible: {what} would be staged byte-for-byte at {src_path} with {man_path}. To authorize exactly this staging, send exactly: AUTHORIZE SOURCE STAGE {did}")
     out["authorization"].update(received=True, evidence=auth[1]); chk("authorization", "PASS", f"current run contains the exact command: {auth[1]}")
 
     # 10 stage: begin → download → finalize (all inside stage.py's temporary directory)
@@ -201,6 +249,7 @@ def run(design_id, queue, drive, resolver, handoff, message="", root=None, now=T
     class A: pass
     a = A(); a.root = root; a.tmp = b["tmp"]; a.design_id = did; a.drive_file_id = fid; a.drive_url = canonical(fid); a.filename = m["name"]; a.drive_mime = m["mime_type"]
     a.status = rec["status"]; a.human_decision = rec["human_decision"]; a.render_source_path = rsp; a.source_resolution = "RESOLVED"; a.downloaded = None; a.expected_sha256 = None; a.warning = [w for w in warnings if w.startswith("Filename extension")]
+    a.source_role = role; a.lineage = json.dumps(out["lineage"]) if out["lineage"] else None
     f = stage.finalize(a, created_at=now)
     out["source"]["sha256"] = f.get("sha256", "")
     if f["outcome"] == "STAGED":

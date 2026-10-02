@@ -1,6 +1,6 @@
 ---
 name: 1901-stage-render-source
-description: Stages the verified Drive artwork master for one 1901 design as an exact local copy with SHA-256 and a handoff manifest; no rendering, no queue writes.
+description: Stages the verified Drive render source for one 1901 design (the approved artwork master, or its human-approved production-prepared derivative) as an exact local copy with SHA-256 and a handoff manifest; no rendering, no queue writes.
 ---
 
 # 1901 Stage Render Source
@@ -8,9 +8,12 @@ description: Stages the verified Drive artwork master for one 1901 design as an 
 Skill #6 in the 1901 Main Street production workflow: the controlled
 image-handoff bridge between the verified Google Drive artwork master and the
 downstream Listing Studio / render workflow. For exactly one production-ready
-design it retrieves the exact approved master that the live production record
-identifies, stages an immutable byte-for-byte local copy on the VPS, computes
-its SHA-256, and writes a machine-readable `manifest.json`.
+design it retrieves the exact approved render source that the live production
+record identifies (the human-approved artwork master or, under the governing
+rule in Approved Production-Prepared Derivatives, that master's human-approved
+production-prepared derivative), stages an immutable byte-for-byte local copy
+on the VPS, computes its SHA-256, and writes a machine-readable
+`manifest.json`.
 
 It does not render, does not alter artwork, does not publish, and does not
 modify the Idea Queue. Its job is:
@@ -63,6 +66,7 @@ governance and readiness.
 |---|---|
 | Idea Queue spreadsheet | `1UxnZsA9aWlxZHqMAt17_7HAe86w_cHcMik3xpXQrfq0` |
 | Idea Queue worksheet | `Idea Queue`, sheet id `1283408381` |
+| Governing docs entry point | `00 Foundations (CURRENT)`, Drive folder `1Jvxd4MwiBfpeKYkM9e8U_xEcmjNt1z1N` |
 | Staging root | `/home/claude/agents/1901/shared/render-handoffs/` |
 | Staging script | `/home/claude/agents/1901/1901-stage-render-source/stage.py` |
 
@@ -70,9 +74,12 @@ Never substitute a duplicate, historical, exported, cached, or similarly named
 Idea Queue. Unreadable sheet, Drive, or governing sources → `SOURCE_UNAVAILABLE`.
 
 **Production rule in force:** the human-approved artwork master is the
-canonical render source, and `render_source_path` must identify that exact
-file. Upscaled or print-output derivatives are subordinate assets and never
-replace the approved master.
+canonical creative master. `render_source_path` must identify the exact
+render source: that master or, only under every condition in Approved
+Production-Prepared Derivatives, its human-approved production-prepared
+derivative. Upscaled files, print exports, thumbnails, convenience copies,
+and any derivative without a recorded human approval are subordinate assets
+and never replace the approved source.
 
 ## Input
 
@@ -106,8 +113,17 @@ is read live in the current run; nothing from a prior run is reused.
    complete `RESOLVED` (with `drive_file_id`, `name`, `url`, `mime_type`)
    continues. `SOURCE_UNAVAILABLE` passes through; anything else →
    `SOURCE_NOT_RESOLVED` carrying the resolver's `human_action_required`.
-5. **Identity.** The file id in `render_source_path` must equal the resolver's
-   `drive_file_id`. Otherwise → `SOURCE_MISMATCH`. Do not pick either side.
+5. **Identity.** Compare the file id in `render_source_path` with the
+   resolver's `drive_file_id`.
+   - Equal: the resolved file is the render source (`source.role` =
+     `resolved_source`). Continue.
+   - Different: the resolver's file is the canonical creative master, and the
+     `render_source_path` file is eligible only as an approved
+     production-prepared derivative of it. Verify every condition in Approved
+     Production-Prepared Derivatives from records read live in this run. All
+     five verified → `source.role` = `approved_prepared_derivative`, `lineage`
+     filled, and the derivative is the file to stage. Anything unverified →
+     `SOURCE_MISMATCH` naming each unmet condition. Do not pick either side.
 6. **Governance.** If `printify_id` is non-blank, record an `INFO` check:
    a pre-existing Printify draft is a parked production artifact that neither
    blocks nor bypasses the render stage, and this skill does not touch it.
@@ -117,8 +133,12 @@ is read live in the current run; nothing from a prior run is reused.
 7. **Drive identity.** Read the file's metadata by id (read-only). Drive
    unreadable → `SOURCE_UNAVAILABLE`; file missing, trashed, or inaccessible
    → `SOURCE_MISSING`; live name or MIME type differs from the resolver's →
-   `SOURCE_MISMATCH`. If the filename extension disagrees with the Drive MIME
-   type, add the warning from Filename Behaviour; it is not a failure.
+   `SOURCE_MISMATCH`. For an approved production-prepared derivative the
+   resolver's name and MIME type describe the canonical master, not this
+   file: the live name must equal the filename the approval record names
+   (`SOURCE_MISMATCH` otherwise) and the live MIME type is recorded as read.
+   If the filename extension disagrees with the Drive MIME type, add the
+   warning from Filename Behaviour; it is not a failure.
 8. **Existing staging.** Run `stage.py check` (read-only; see Staging Script)
    for the design folder `<root>/<design_id>/`. Apply Safe Replacement.
 9. **Authorization.** Only now. The current run's user message must be exactly
@@ -129,8 +149,9 @@ is read live in the current run; nothing from a prior run is reused.
 10. **Stage.** `stage.py begin` creates the temporary directory
     `<root>/.tmp-<design_id>-<run id>/source/`. Download the exact bytes of
     the Drive file by id into the path it prints. Download fails → run
-    `stage.py abort` and return `DOWNLOAD_FAILED`. Then `stage.py finalize`,
-    which hashes the bytes, re-checks the existing folder with the hash in
+    `stage.py abort` and return `DOWNLOAD_FAILED`. Then `stage.py finalize`
+    (with `--source-role` and, for a derivative, `--lineage`), which hashes
+    the bytes, re-checks the existing folder with the hash in
     hand, writes and re-reads `manifest.json`, re-hashes the staged file,
     and only then renames the temporary directory to `<root>/<design_id>/`
     in one atomic operation. Its outcome is the result: `STAGED`,
@@ -177,10 +198,68 @@ above; nothing is waived on the strength of this rule. Never modify Open
 Items, the Decision Log, or governing documents. This skill implements
 infrastructure only.
 
+## Approved Production-Prepared Derivatives
+
+The original human-approved artwork remains the canonical creative master.
+The governing 1901 documentation distinguishes it from an **approved
+production-prepared derivative**: a file prepared from that master to meet a
+legitimate, governing production requirement (for example true transparency
+for apparel) and explicitly approved by a human as the render source. Such a
+derivative may be staged even though `art_path` still points to the canonical
+creative master, but only when every one of these conditions is verified from
+records read live in this run:
+
+1. **Governing requirement.** A current governing document, reached from the
+   entry point in Authoritative Sources, states the production requirement;
+   the requirement applies to this design; and the approval record states
+   that the derivative was prepared for exactly that requirement.
+2. **Identity preserved.** The approval record states that the prepared
+   derivative preserves the approved design identity and content, changing
+   only what the requirement needed.
+3. **Lineage.** The approval record names the canonical creative master the
+   derivative was prepared from, by Drive file id, and that id equals the
+   file the resolver resolved.
+4. **Explicit human approval.** A human approval of the prepared derivative
+   itself is recorded in the governed production record (Decision Log entry,
+   approval record, or an equivalent current governing record), naming the
+   derivative by Drive file id. The design's `human_decision = APPROVE`
+   approves the design, not the derivative, and never satisfies this
+   condition.
+5. **Exact pointer.** `render_source_path` identifies exactly the Drive file
+   id that the approval record names.
+
+Record the outcome as one `prepared_derivative` check: on `PASS` the detail
+cites the governing document and the approval record; on `FAIL` it lists
+every unmet condition. A `FAIL` ends the run with `SOURCE_MISMATCH`, exactly
+as a mismatched `render_source_path` always has. The human then either
+records the missing evidence in the governed production record or points
+`render_source_path` back at the approved source through an authorized
+workflow; Walter does neither.
+
+Never infer approval, lineage, purpose, or identity from a filename
+(`-transparent`, `-prep`, `-v2`, `-final`), a Drive folder, a MIME type, the
+file's existence, its dimensions, an alpha channel, a pixel comparison with
+the master, chat, or memory. Walter does not open or compare images to
+decide; the records decide. Generic derived assets, convenience copies,
+thumbnails, previews, web exports, unapproved transparency conversions, and
+ordinary upscaled or print-output files remain blocked exactly as before.
+When the resolver itself resolves to the prepared derivative, that is its
+finding under the governing rule, and the run proceeds through the equal-id
+branch of step 5.
+
+Nothing else changes for a verified derivative: byte-for-byte copy, SHA-256
+twice, manifest re-read, atomic rename, no retry, and the exact
+`AUTHORIZE SOURCE STAGE <design_id>` command in the same run. The manifest
+records `source.role` and `lineage` so the Listing Studio can trace the
+staged file to its canonical master. One design folder holds one source: a
+master staged earlier for the same design is a `STAGING_CONFLICT` under Safe
+Replacement, and a human moves it aside; this skill never deletes it.
+
 ## Source Retrieval and Byte Preservation
 
 Retrieve the exact Drive file by the id in `render_source_path`, confirmed
-equal to the resolver's id. Never use `art_path` as a substitute, a filename
+equal to the resolver's id or verified as an approved production-prepared
+derivative of it. Never use `art_path` as a substitute, a filename
 search, the newest or largest file, a PRINT derivative, a sibling, a cached
 copy, or a similar filename, unless it has already been proven to be the
 same Drive file id.
@@ -214,11 +293,11 @@ create its `source/` directory, write the exact downloaded bytes into it,
 and create `manifest.json`. All four happen inside the temporary directory
 and become visible in one atomic rename.
 
-`manifest.json` (schema 1.0):
+`manifest.json` (schema 1.1; 1.0 plus `source.role` and `lineage`):
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "design_id": "1901-093",
   "created_at": "2026-10-01T00:30:00Z",
   "source": {
@@ -227,12 +306,27 @@ and become visible in one atomic rename.
     "filename": "1901-093-B.png",
     "drive_mime_type": "image/png",
     "sha256": "<hex>",
-    "local_path": "/home/claude/agents/1901/shared/render-handoffs/1901-093/source/1901-093-B.png"
+    "local_path": "/home/claude/agents/1901/shared/render-handoffs/1901-093/source/1901-093-B.png",
+    "role": "resolved_source"
   },
+  "lineage": null,
   "authority": { "status": "Approved", "human_decision": "APPROVE", "render_source_path": "<as read>", "source_resolution": "RESOLVED" },
   "integrity": { "byte_preserved": true, "hash_verified": true, "artwork_modified": false },
   "handoff": { "ready_for_listing_studio": true },
   "warnings": []
+}
+```
+
+For an approved production-prepared derivative, `source.role` is
+`approved_prepared_derivative` and `lineage` is recorded from the governed
+production record, never composed by Walter:
+
+```json
+"lineage": {
+  "canonical_master": { "drive_file_id": "1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve", "filename": "1901-093-B.png", "drive_url": "https://drive.google.com/file/d/1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve/view" },
+  "production_requirement": "true transparency for apparel",
+  "governing_document": "<the current governing document that states the requirement>",
+  "approval_record": "<the record of the human approval of the prepared derivative>"
 }
 ```
 
@@ -302,8 +396,15 @@ python3 $S finalize --tmp <tmp> --design-id 1901-093 --drive-file-id <id> \
   --drive-url https://drive.google.com/file/d/<id>/view --filename 1901-093-B.png \
   --drive-mime image/png --status Approved --human-decision APPROVE \
   --render-source-path "<as read>" --source-resolution RESOLVED \
+  [--source-role resolved_source|approved_prepared_derivative] [--lineage '<lineage JSON>'] \
   [--expected-sha256 <drive checksum>] [--warning "<filename/MIME warning>"]
 ```
+
+`--source-role` defaults to `resolved_source`. A derivative requires
+`--lineage` (the object shown under Staging Layout); the script refuses a
+derivative without lineage, lineage on a resolved source, and lineage whose
+canonical master is the staged file itself (`MANIFEST_FAILED`, nothing
+published).
 
 `finalize` hashes, re-checks the existing folder with the hash, writes and
 re-reads the manifest, re-hashes, then renames the temporary directory into
@@ -322,7 +423,8 @@ Return exactly one JSON object:
   "result": "",
   "stage_performed": false,
   "timestamp": "ISO 8601 UTC",
-  "source": { "drive_file_id": "", "drive_url": "", "filename": "", "mime_type": "", "sha256": "" },
+  "source": { "drive_file_id": "", "drive_url": "", "filename": "", "mime_type": "", "sha256": "", "role": "" },
+  "lineage": null,
   "staging": { "root": "/home/claude/agents/1901/shared/render-handoffs/", "design_folder": "", "source_path": "", "manifest_path": "" },
   "verification": { "queue_verified": false, "human_approval_verified": false, "source_resolved": false, "source_matches_render_source_path": false, "hash_verified": false, "byte_preserved": false, "manifest_verified": false },
   "authorization": { "received": false, "evidence": "" },
@@ -335,6 +437,9 @@ Return exactly one JSON object:
 - `stage_performed` is `true` only for `STAGED`.
 - `source.sha256` is filled once bytes were hashed (`STAGED`,
   `ALREADY_STAGED`, and the failures after hashing).
+- `source.role` is `resolved_source` or `approved_prepared_derivative` once
+  identity is established; `lineage` is the object from Staging Layout for a
+  derivative and `null` otherwise.
 - `staging` paths are the intended paths, filled as soon as the filename is
   known, so a proposal names exactly where the file would go.
 - `verification` flags turn `true` only when that check passed in this run.
@@ -354,7 +459,7 @@ Return exactly one JSON object:
 | `HUMAN_APPROVAL_REQUIRED` | none | `human_decision` is not `APPROVE` or `status` is not `Approved` |
 | `SOURCE_MISSING` | none | `render_source_path` is blank, or the Drive file no longer exists |
 | `SOURCE_NOT_RESOLVED` | none | The resolver did not return a complete `RESOLVED` |
-| `SOURCE_MISMATCH` | none | `render_source_path`, the resolver, and Drive do not name the same file |
+| `SOURCE_MISMATCH` | none | `render_source_path`, the resolver, and Drive do not name the same file, and the file is not a verified approved production-prepared derivative |
 | `GOVERNANCE_BLOCK` | none | An unresolved governance blocker other than the bridge item |
 | `SOURCE_UNAVAILABLE` | none | Sheet, Drive, or governing sources could not be read |
 | `STAGING_CONFLICT` | none | An existing handoff names a different or unverifiable source |
@@ -373,6 +478,17 @@ Return exactly one JSON object:
   under the original name, add the warning, change nothing.
 - **A `-PRINT` or upscaled sibling is larger and newer.** Subordinate asset.
   Never staged by this skill.
+- **`render_source_path` points to `…-transparent-prep-v2.png` while `art_path`
+  still names the master.** The name proves nothing. Stage it only when all
+  five conditions in Approved Production-Prepared Derivatives verify from
+  the governing document and the recorded human approval; otherwise
+  `SOURCE_MISMATCH`.
+- **The derivative is obviously the master with the background removed.**
+  Walter never judges that by looking. Identity preservation is a recorded
+  human statement or it is unmet.
+- **The master was staged yesterday and the derivative is now the source.**
+  `STAGING_CONFLICT`. A human moves the old handoff folder aside; this skill
+  never deletes or overwrites it.
 - **The only blocker is the "bridge not built" open item.** Continue, with
   the waiver recorded. Any other open item in that blocker → `GOVERNANCE_BLOCK`.
 - **A pre-existing Printify draft exists.** It neither bypasses nor blocks
@@ -412,8 +528,10 @@ Input: `Stage the render source for 1901-093.` Everything is eligible; nothing i
   "drive_url": "https://drive.google.com/file/d/1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve/view",
   "filename": "1901-093-B.png",
   "mime_type": "image/png",
-  "sha256": ""
+  "sha256": "",
+  "role": "resolved_source"
  },
+ "lineage": null,
  "staging": {
   "root": "/home/claude/agents/1901/shared/render-handoffs/",
   "design_folder": "/home/claude/agents/1901/shared/render-handoffs/1901-093",
@@ -505,8 +623,10 @@ Input: `AUTHORIZE SOURCE STAGE 1901-093`, in a new run. All checks re-run, bytes
   "drive_url": "https://drive.google.com/file/d/1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve/view",
   "filename": "1901-093-B.png",
   "mime_type": "image/png",
-  "sha256": "a9c8a46924afca4e56d7d0dc843f8d78c0e821bbdaa0e303b2607fa55aa7d799"
+  "sha256": "a9c8a46924afca4e56d7d0dc843f8d78c0e821bbdaa0e303b2607fa55aa7d799",
+  "role": "resolved_source"
  },
+ "lineage": null,
  "staging": {
   "root": "/home/claude/agents/1901/shared/render-handoffs/",
   "design_folder": "/home/claude/agents/1901/shared/render-handoffs/1901-093",
@@ -608,8 +728,10 @@ Target `1901-093`; input `AUTHORIZE SOURCE STAGE 1901-094`.
   "drive_url": "https://drive.google.com/file/d/1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve/view",
   "filename": "1901-093-B.png",
   "mime_type": "image/png",
-  "sha256": ""
+  "sha256": "",
+  "role": "resolved_source"
  },
+ "lineage": null,
  "staging": {
   "root": "/home/claude/agents/1901/shared/render-handoffs/",
   "design_folder": "/home/claude/agents/1901/shared/render-handoffs/1901-093",
@@ -701,8 +823,10 @@ An authorised run finds the same Drive file already staged; the downloaded bytes
   "drive_url": "https://drive.google.com/file/d/1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve/view",
   "filename": "1901-093-B.png",
   "mime_type": "image/png",
-  "sha256": "a9c8a46924afca4e56d7d0dc843f8d78c0e821bbdaa0e303b2607fa55aa7d799"
+  "sha256": "a9c8a46924afca4e56d7d0dc843f8d78c0e821bbdaa0e303b2607fa55aa7d799",
+  "role": "resolved_source"
  },
+ "lineage": null,
  "staging": {
   "root": "/home/claude/agents/1901/shared/render-handoffs/",
   "design_folder": "/home/claude/agents/1901/shared/render-handoffs/1901-093",
@@ -804,8 +928,10 @@ An authorised run finds the same Drive file already staged; the downloaded bytes
   "drive_url": "https://drive.google.com/file/d/1OTHERfileAAAAAAAAAAAAAAAAAAAAAAAA/view",
   "filename": "1901-093-C.png",
   "mime_type": "image/png",
-  "sha256": ""
+  "sha256": "",
+  "role": "resolved_source"
  },
+ "lineage": null,
  "staging": {
   "root": "/home/claude/agents/1901/shared/render-handoffs/",
   "design_folder": "/home/claude/agents/1901/shared/render-handoffs/1901-093",
@@ -890,8 +1016,10 @@ An authorised run finds the same Drive file already staged; the downloaded bytes
   "drive_url": "",
   "filename": "",
   "mime_type": "",
-  "sha256": ""
+  "sha256": "",
+  "role": ""
  },
+ "lineage": null,
  "staging": {
   "root": "/home/claude/agents/1901/shared/render-handoffs/",
   "design_folder": "",
@@ -946,8 +1074,10 @@ An authorised run finds the same Drive file already staged; the downloaded bytes
   "drive_url": "",
   "filename": "",
   "mime_type": "",
-  "sha256": ""
+  "sha256": "",
+  "role": ""
  },
+ "lineage": null,
  "staging": {
   "root": "/home/claude/agents/1901/shared/render-handoffs/",
   "design_folder": "",
@@ -1007,8 +1137,10 @@ An authorised run finds the same Drive file already staged; the downloaded bytes
   "drive_url": "",
   "filename": "",
   "mime_type": "",
-  "sha256": ""
+  "sha256": "",
+  "role": ""
  },
+ "lineage": null,
  "staging": {
   "root": "/home/claude/agents/1901/shared/render-handoffs/",
   "design_folder": "",
@@ -1057,11 +1189,16 @@ An authorised run finds the same Drive file already staged; the downloaded bytes
   },
   {
    "check": "source_identity",
+   "status": "INFO",
+   "detail": "render_source_path names Drive file 1OTHERfileAAAAAAAAAAAAAAAAAAAAAAAA; the resolver resolved the canonical creative master 1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve (1901-093-B.png); 1OTHERfileAAAAAAAAAAAAAAAAAAAAAAAA is eligible only as an approved production-prepared derivative"
+  },
+  {
+   "check": "prepared_derivative",
    "status": "FAIL",
-   "detail": "render_source_path names Drive file 1OTHERfileAAAAAAAAAAAAAAAAAAAAAAAA but the resolver resolved 1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve"
+   "detail": "not verified as an approved production-prepared derivative: no current governing record names this file as an approved production-prepared derivative of the resolved canonical creative master"
   }
  ],
- "human_action_required": "render_source_path and the resolved production source for 1901-093 name different Drive files; a human must reconcile them before staging."
+ "human_action_required": "render_source_path for 1901-093 names Drive file 1OTHERfileAAAAAAAAAAAAAAAAAAAAAAAA, which is neither the resolved canonical creative master 1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve nor a verified approved production-prepared derivative of it; a human must record the missing approval evidence in the governed production record or point render_source_path back at the approved source through an authorized workflow."
 }
 ```
 
@@ -1080,8 +1217,10 @@ Input: `Stage the render source for 1901-093.` with a non-blank `printify_id`. T
   "drive_url": "https://drive.google.com/file/d/1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve/view",
   "filename": "1901-093-B.png",
   "mime_type": "image/png",
-  "sha256": ""
+  "sha256": "",
+  "role": "resolved_source"
  },
+ "lineage": null,
  "staging": {
   "root": "/home/claude/agents/1901/shared/render-handoffs/",
   "design_folder": "/home/claude/agents/1901/shared/render-handoffs/1901-093",
@@ -1178,8 +1317,10 @@ Temporary directory removed; no handoff folder exists.
   "drive_url": "https://drive.google.com/file/d/1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve/view",
   "filename": "1901-093-B.png",
   "mime_type": "image/png",
-  "sha256": ""
+  "sha256": "",
+  "role": "resolved_source"
  },
+ "lineage": null,
  "staging": {
   "root": "/home/claude/agents/1901/shared/render-handoffs/",
   "design_folder": "/home/claude/agents/1901/shared/render-handoffs/1901-093",
@@ -1276,8 +1417,10 @@ The staged bytes did not re-hash to the first hash; nothing published.
   "drive_url": "https://drive.google.com/file/d/1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve/view",
   "filename": "1901-093-B.png",
   "mime_type": "image/png",
-  "sha256": "a9c8a46924afca4e56d7d0dc843f8d78c0e821bbdaa0e303b2607fa55aa7d799"
+  "sha256": "a9c8a46924afca4e56d7d0dc843f8d78c0e821bbdaa0e303b2607fa55aa7d799",
+  "role": "resolved_source"
  },
+ "lineage": null,
  "staging": {
   "root": "/home/claude/agents/1901/shared/render-handoffs/",
   "design_folder": "/home/claude/agents/1901/shared/render-handoffs/1901-093",
@@ -1377,8 +1520,10 @@ The staged bytes did not re-hash to the first hash; nothing published.
   "drive_url": "https://drive.google.com/file/d/1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve/view",
   "filename": "1901-093-B.png",
   "mime_type": "image/jpeg",
-  "sha256": "ab6dd4b68af1f17d9c6e435a37eaf2337a10a0e3bd6a6644451582001c179e8c"
+  "sha256": "ab6dd4b68af1f17d9c6e435a37eaf2337a10a0e3bd6a6644451582001c179e8c",
+  "role": "resolved_source"
  },
+ "lineage": null,
  "staging": {
   "root": "/home/claude/agents/1901/shared/render-handoffs/",
   "design_folder": "/home/claude/agents/1901/shared/render-handoffs/1901-093",
@@ -1472,13 +1617,307 @@ The staged bytes did not re-hash to the first hash; nothing published.
 }
 ```
 
+### M. Approved production-prepared derivative, proposal: AWAITING_AUTHORIZATION
+
+Input: `Stage the render source for 1901-093.` `art_path` still names the canonical master `1901-093-B.png`; `render_source_path` names `1901-093-B-transparent-prep-v2.png`; the resolver resolves the master; the governing document states the transparency requirement and the Decision Log records the human approval of the derivative with its Drive id and its master's. All five conditions verify; nothing is created.
+
+```json
+{
+ "design_id": "1901-093",
+ "result": "AWAITING_AUTHORIZATION",
+ "stage_performed": false,
+ "timestamp": "2026-10-01T00:30:00Z",
+ "source": {
+  "drive_file_id": "10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR",
+  "drive_url": "https://drive.google.com/file/d/10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR/view",
+  "filename": "1901-093-B-transparent-prep-v2.png",
+  "mime_type": "image/png",
+  "sha256": "",
+  "role": "approved_prepared_derivative"
+ },
+ "lineage": {
+  "canonical_master": {
+   "drive_file_id": "1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve",
+   "filename": "1901-093-B.png",
+   "drive_url": "https://drive.google.com/file/d/1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve/view"
+  },
+  "production_requirement": "true transparency for apparel",
+  "governing_document": "01 — 1901 Listing Render System (CURRENT)",
+  "approval_record": "07 — Decision Log: 2026-10-02 entry approving 1901-093-B-transparent-prep-v2.png (Drive id 10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR) as the production-prepared render source for 1901-093"
+ },
+ "staging": {
+  "root": "/home/claude/agents/1901/shared/render-handoffs/",
+  "design_folder": "/home/claude/agents/1901/shared/render-handoffs/1901-093",
+  "source_path": "/home/claude/agents/1901/shared/render-handoffs/1901-093/source/1901-093-B-transparent-prep-v2.png",
+  "manifest_path": "/home/claude/agents/1901/shared/render-handoffs/1901-093/manifest.json"
+ },
+ "verification": {
+  "queue_verified": true,
+  "human_approval_verified": true,
+  "source_resolved": true,
+  "source_matches_render_source_path": true,
+  "hash_verified": false,
+  "byte_preserved": false,
+  "manifest_verified": false
+ },
+ "authorization": {
+  "received": false,
+  "evidence": ""
+ },
+ "warnings": [],
+ "checks": [
+  {
+   "check": "input",
+   "status": "PASS",
+   "detail": "design_id '1901-093' (trimmed)"
+  },
+  {
+   "check": "queue_read",
+   "status": "PASS",
+   "detail": "exactly one row (sheet row 95) carries id 1901-093"
+  },
+  {
+   "check": "human_approval",
+   "status": "PASS",
+   "detail": "human_decision is exactly APPROVE and status is exactly Approved"
+  },
+  {
+   "check": "render_source_path",
+   "status": "PASS",
+   "detail": "render_source_path identifies Drive file 10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR"
+  },
+  {
+   "check": "source_resolution",
+   "status": "PASS",
+   "detail": "RESOLVED: 1901-093-B.png (id 1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve, image/png)"
+  },
+  {
+   "check": "source_identity",
+   "status": "INFO",
+   "detail": "render_source_path names Drive file 10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR; the resolver resolved the canonical creative master 1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve (1901-093-B.png); 10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR is eligible only as an approved production-prepared derivative"
+  },
+  {
+   "check": "prepared_derivative",
+   "status": "PASS",
+   "detail": "Drive file 10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR is recorded as the human-approved production-prepared derivative of canonical master 1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve for the governing requirement 'true transparency for apparel' (01 — 1901 Listing Render System (CURRENT); approval: 07 — Decision Log: 2026-10-02 entry approving 1901-093-B-transparent-prep-v2.png (Drive id 10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR) as the production-prepared render source for 1901-093); render_source_path points exactly to it"
+  },
+  {
+   "check": "governance",
+   "status": "PASS",
+   "detail": "1901-prepare-production-handoff reports no unresolved blocker for this design"
+  },
+  {
+   "check": "drive_identity",
+   "status": "PASS",
+   "detail": "Drive file 10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR exists: 1901-093-B-transparent-prep-v2.png, image/png (approved production-prepared derivative; name as recorded)"
+  },
+  {
+   "check": "existing_staging",
+   "status": "PASS",
+   "detail": "no handoff folder exists for this design"
+  },
+  {
+   "check": "authorization",
+   "status": "FAIL",
+   "detail": "the current run does not contain the exact command AUTHORIZE SOURCE STAGE 1901-093; ordinary requests and vague confirmations never authorize staging"
+  }
+ ],
+ "human_action_required": "No files created. 1901-093 is eligible: 1901-093-B-transparent-prep-v2.png (Drive id 10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR, https://drive.google.com/file/d/10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR/view), the approved production-prepared derivative of canonical master 1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve (1901-093-B.png) would be staged byte-for-byte at /home/claude/agents/1901/shared/render-handoffs/1901-093/source/1901-093-B-transparent-prep-v2.png with /home/claude/agents/1901/shared/render-handoffs/1901-093/manifest.json. To authorize exactly this staging, send exactly: AUTHORIZE SOURCE STAGE 1901-093"
+}
+```
+
+### N. Derivative with no recorded approval: SOURCE_MISMATCH
+
+Same queue row, but nothing in the governing documents or the design's production record names the `render_source_path` file as an approved production-prepared derivative.
+
+```json
+{
+ "design_id": "1901-093",
+ "result": "SOURCE_MISMATCH",
+ "stage_performed": false,
+ "timestamp": "2026-10-01T00:30:00Z",
+ "source": {
+  "drive_file_id": "",
+  "drive_url": "",
+  "filename": "",
+  "mime_type": "",
+  "sha256": "",
+  "role": ""
+ },
+ "lineage": null,
+ "staging": {
+  "root": "/home/claude/agents/1901/shared/render-handoffs/",
+  "design_folder": "",
+  "source_path": "",
+  "manifest_path": ""
+ },
+ "verification": {
+  "queue_verified": true,
+  "human_approval_verified": true,
+  "source_resolved": true,
+  "source_matches_render_source_path": false,
+  "hash_verified": false,
+  "byte_preserved": false,
+  "manifest_verified": false
+ },
+ "authorization": {
+  "received": false,
+  "evidence": ""
+ },
+ "warnings": [],
+ "checks": [
+  {
+   "check": "input",
+   "status": "PASS",
+   "detail": "design_id '1901-093' (trimmed)"
+  },
+  {
+   "check": "queue_read",
+   "status": "PASS",
+   "detail": "exactly one row (sheet row 95) carries id 1901-093"
+  },
+  {
+   "check": "human_approval",
+   "status": "PASS",
+   "detail": "human_decision is exactly APPROVE and status is exactly Approved"
+  },
+  {
+   "check": "render_source_path",
+   "status": "PASS",
+   "detail": "render_source_path identifies Drive file 10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR"
+  },
+  {
+   "check": "source_resolution",
+   "status": "PASS",
+   "detail": "RESOLVED: 1901-093-B.png (id 1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve, image/png)"
+  },
+  {
+   "check": "source_identity",
+   "status": "INFO",
+   "detail": "render_source_path names Drive file 10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR; the resolver resolved the canonical creative master 1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve (1901-093-B.png); 10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR is eligible only as an approved production-prepared derivative"
+  },
+  {
+   "check": "prepared_derivative",
+   "status": "FAIL",
+   "detail": "not verified as an approved production-prepared derivative: no current governing record names this file as an approved production-prepared derivative of the resolved canonical creative master"
+  }
+ ],
+ "human_action_required": "render_source_path for 1901-093 names Drive file 10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR, which is neither the resolved canonical creative master 1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve nor a verified approved production-prepared derivative of it; a human must record the missing approval evidence in the governed production record or point render_source_path back at the approved source through an authorized workflow."
+}
+```
+
+### O. Master staged earlier, verified derivative now the source: STAGING_CONFLICT
+
+The existing handoff folder holds the canonical master. Nothing is overwritten; a human moves the old folder aside.
+
+```json
+{
+ "design_id": "1901-093",
+ "result": "STAGING_CONFLICT",
+ "stage_performed": false,
+ "timestamp": "2026-10-01T00:30:00Z",
+ "source": {
+  "drive_file_id": "10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR",
+  "drive_url": "https://drive.google.com/file/d/10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR/view",
+  "filename": "1901-093-B-transparent-prep-v2.png",
+  "mime_type": "image/png",
+  "sha256": "",
+  "role": "approved_prepared_derivative"
+ },
+ "lineage": {
+  "canonical_master": {
+   "drive_file_id": "1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve",
+   "filename": "1901-093-B.png",
+   "drive_url": "https://drive.google.com/file/d/1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve/view"
+  },
+  "production_requirement": "true transparency for apparel",
+  "governing_document": "01 — 1901 Listing Render System (CURRENT)",
+  "approval_record": "07 — Decision Log: 2026-10-02 entry approving 1901-093-B-transparent-prep-v2.png (Drive id 10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR) as the production-prepared render source for 1901-093"
+ },
+ "staging": {
+  "root": "/home/claude/agents/1901/shared/render-handoffs/",
+  "design_folder": "/home/claude/agents/1901/shared/render-handoffs/1901-093",
+  "source_path": "/home/claude/agents/1901/shared/render-handoffs/1901-093/source/1901-093-B-transparent-prep-v2.png",
+  "manifest_path": "/home/claude/agents/1901/shared/render-handoffs/1901-093/manifest.json"
+ },
+ "verification": {
+  "queue_verified": true,
+  "human_approval_verified": true,
+  "source_resolved": true,
+  "source_matches_render_source_path": true,
+  "hash_verified": false,
+  "byte_preserved": false,
+  "manifest_verified": false
+ },
+ "authorization": {
+  "received": false,
+  "evidence": ""
+ },
+ "warnings": [],
+ "checks": [
+  {
+   "check": "input",
+   "status": "PASS",
+   "detail": "design_id '1901-093' (trimmed)"
+  },
+  {
+   "check": "queue_read",
+   "status": "PASS",
+   "detail": "exactly one row (sheet row 95) carries id 1901-093"
+  },
+  {
+   "check": "human_approval",
+   "status": "PASS",
+   "detail": "human_decision is exactly APPROVE and status is exactly Approved"
+  },
+  {
+   "check": "render_source_path",
+   "status": "PASS",
+   "detail": "render_source_path identifies Drive file 10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR"
+  },
+  {
+   "check": "source_resolution",
+   "status": "PASS",
+   "detail": "RESOLVED: 1901-093-B.png (id 1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve, image/png)"
+  },
+  {
+   "check": "source_identity",
+   "status": "INFO",
+   "detail": "render_source_path names Drive file 10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR; the resolver resolved the canonical creative master 1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve (1901-093-B.png); 10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR is eligible only as an approved production-prepared derivative"
+  },
+  {
+   "check": "prepared_derivative",
+   "status": "PASS",
+   "detail": "Drive file 10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR is recorded as the human-approved production-prepared derivative of canonical master 1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve for the governing requirement 'true transparency for apparel' (01 — 1901 Listing Render System (CURRENT); approval: 07 — Decision Log: 2026-10-02 entry approving 1901-093-B-transparent-prep-v2.png (Drive id 10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR) as the production-prepared render source for 1901-093); render_source_path points exactly to it"
+  },
+  {
+   "check": "governance",
+   "status": "PASS",
+   "detail": "1901-prepare-production-handoff reports no unresolved blocker for this design"
+  },
+  {
+   "check": "drive_identity",
+   "status": "PASS",
+   "detail": "Drive file 10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR exists: 1901-093-B-transparent-prep-v2.png, image/png (approved production-prepared derivative; name as recorded)"
+  },
+  {
+   "check": "existing_staging",
+   "status": "FAIL",
+   "detail": "existing handoff references Drive file 1WloiO2PNmvIZHQWBsYyYjqDCQOlae6Ve, not 10mJCJKo2GrxHPnj6qly3RxXn4SbkkMUR"
+  }
+ ],
+ "human_action_required": "A handoff folder for 1901-093 already exists with a different or unverifiable source (/home/claude/agents/1901/shared/render-handoffs/1901-093); a human must review it. Nothing was overwritten."
+}
+```
+
 ## Verification
 
 The skill worked if the reply is one JSON object in the shape above; no file
 or directory was created unless that run's user message was exactly
 `AUTHORIZE SOURCE STAGE <design_id>` and every live check passed; the staged
 bytes hash to the manifest's SHA-256 and to the Drive source; the filename is
-unchanged; the design folder appeared only by atomic rename of a complete
+unchanged; a staged derivative's manifest carries `lineage` to its canonical
+master and a staged master's carries none; the design folder appeared only by atomic rename of a complete
 temporary directory; no existing design folder was modified or removed; and
 no sheet cell, Drive file, document, Printify or Etsy object, or renderer was
 touched.
